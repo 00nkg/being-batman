@@ -1,9 +1,9 @@
-
 name: Website Scraper
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    # हर 6 घंटे में चलेगा (क्योंकि Playwright से GitHub के फ्री मिनट्स जल्दी खत्म होते हैं)
+    - cron: "0 */6 * * *" 
 
   workflow_dispatch:
 
@@ -17,7 +17,8 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # टाइमआउट बढ़ाकर 30 मिनट कर दिया है
+    timeout-minutes: 30 
 
     steps:
       - name: Checkout repository
@@ -33,18 +34,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Playwright के लिए ब्राउज़र इंस्टॉल करना ज़रूरी है
+      - name: Install Playwright Browsers
+        run: playwright install --with-deps chromium
+
       - name: Run scraper
         run: python -u src/scraper.py
-        timeout-minutes: 3
+        # स्क्रिप्ट चलने का टाइमआउट 20 मिनट कर दिया है
+        timeout-minutes: 20 
 
-      - name: Check data.json
+      # अब हम data.json की जगह api/latest.json चेक करेंगे
+      - name: Check api/latest.json
         run: |
-          if [ ! -f data.json ]; then
-            echo "ERROR: data.json not found!"
+          if [ ! -f api/latest.json ]; then
+            echo "ERROR: api/latest.json not found!"
             exit 1
           fi
 
-          python -m json.tool data.json > /dev/null
+          python -m json.tool api/latest.json > /dev/null
           echo "JSON file is valid."
 
       - name: Update JSON
@@ -52,10 +59,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data.json
+          # अब हम api/latest.json को अपडेट करेंगे
+          git add api/latest.json
 
           if git diff --cached --quiet; then
-            echo "No changes in data.json"
+            echo "No changes in api/latest.json"
           else
             git commit -m "Update website data"
             git push
