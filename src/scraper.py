@@ -3,22 +3,26 @@ import requests
 import json
 import time
 import re
+
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urldefrag
-from urllib.robotparser import RobotFileParser
 
-# ==========================================
+# =====================================
 # WEBSITE SETTINGS
-# ==========================================
+# =====================================
 
 BASE_URL = "https://vegamovies.lease"  # YOUR WEBSITE URL
 START_URL = BASE_URL
 
 OUTPUT_FILE = "data.json"
 
-MAX_PAGES = 200
+MAX_PAGES = 3
+TIMEOUT = 10
 REQUEST_DELAY = 1
-TIMEOUT = 25
+
+# =====================================
+# HEADERS
+# =====================================
 
 HEADERS = {
     "User-Agent": (
@@ -26,9 +30,8 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
+    "Accept": "text/html,application/xhtml+xml,*/*",
+    "Accept-Language": "en-US,en;q=0.9"
 }
 
 session = requests.Session()
@@ -36,11 +39,13 @@ session.headers.update(HEADERS)
 
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
-# ==========================================
-# URL HELPERS
-# ==========================================
+
+# =====================================
+# URL CLEANER
+# =====================================
 
 def clean_url(url, base):
+
     if not url:
         return ""
 
@@ -56,16 +61,27 @@ def clean_url(url, base):
 
 
 def same_domain(url):
-    return urlparse(url).netloc.lower() == BASE_HOST
+
+    return (
+        urlparse(url).netloc.lower()
+        == BASE_HOST
+    )
 
 
-# ==========================================
-# REQUEST HTML
-# ==========================================
+# =====================================
+# FETCH WEBSITE
+# =====================================
 
 def get_soup(url):
+
     try:
-        response = session.get(url, timeout=TIMEOUT)
+
+        response = session.get(
+            url,
+            timeout=TIMEOUT,
+            allow_redirects=True
+        )
+
         response.raise_for_status()
 
         content_type = response.headers.get(
@@ -73,6 +89,7 @@ def get_soup(url):
         )
 
         if "html" not in content_type.lower():
+            print("[WARNING] Not an HTML page:", url)
             return None
 
         return BeautifulSoup(
@@ -80,173 +97,190 @@ def get_soup(url):
             "html.parser"
         )
 
+    except requests.Timeout:
+
+        print("[TIMEOUT] Website took too long:", url)
+        return None
+
     except requests.RequestException as error:
-        print(f"[ERROR] {url}: {error}")
+
+        print("[ERROR]", error)
         return None
 
 
-# ==========================================
-# IMAGE EXTRACTION
-# ==========================================
+# =====================================
+# EXTRACT IMAGES
+# =====================================
 
 def extract_images(container, page_url):
+
     images = []
 
     for img in container.select("img"):
-        image_url = (
+
+        src = (
             img.get("data-src")
             or img.get("data-lazy-src")
             or img.get("data-original")
-            or img.get("data-original-src")
             or img.get("src")
         )
 
-        # Try srcset if src is missing
-        if not image_url and img.get("srcset"):
-            image_url = img["srcset"].split(",")[0].strip().split(" ")[0]
+        if not src and img.get("srcset"):
 
-        if image_url:
-            image_url = clean_url(image_url, page_url)
+            src = (
+                img["srcset"]
+                .split(",")[0]
+                .strip()
+                .split(" ")[0]
+            )
 
-            if image_url:
-                images.append({
-                    "URL": image_url,
-                    "Alt": img.get("alt", "")
-                })
+        if src:
 
-    # Background images
-    for element in container.select("[style]"):
-        style = element.get("style", "")
-
-        matches = re.findall(
-            r"url\(['\"]?(.*?)['\"]?\)",
-            style,
-            re.I
-        )
-
-        for match in matches:
-            image_url = clean_url(match, page_url)
+            image_url = clean_url(src, page_url)
 
             if image_url:
-                images.append({
-                    "URL": image_url,
-                    "Alt": "Background image"
-                })
+                images.append(image_url)
 
-    # Remove duplicate images
-    unique = {}
-
-    for image in images:
-        unique[image["URL"]] = image
-
-    return list(unique.values())
+    return list(set(images))
 
 
-# ==========================================
-# ALL LINKS EXTRACTION
-# ==========================================
+# =====================================
+# EXTRACT ALL LINKS
+# =====================================
 
 def extract_links(container, page_url):
+
     links = []
 
-    for tag in container.select("a[href]"):
-        href = clean_url(tag.get("href"), page_url)
+    for a in container.select("a[href]"):
+
+        href = clean_url(
+            a.get("href"), page_url
+        )
 
         if not href:
             continue
 
         links.append({
-            "Text": tag.get_text(" ", strip=True),
-            "URL": href,
-            "Title": tag.get("title", "")
+            "Text": a.get_text(" ", strip=True),
+            "URL": href
         })
 
-    # Remove duplicate URLs
-    unique = {}
-
-    for link in links:
-        unique[link["URL"]] = link
+    unique = {
+        link["URL"]: link
+        for link in links
+    }
 
     return list(unique.values())
 
 
-# ==========================================
-# DOWNLOAD / WATCH LINK DETECTION
-# ==========================================
+# =====================================
+# DOWNLOAD LINK DETECTION
+# =====================================
 
 DOWNLOAD_WORDS = [
-    "download", "dl", "drive.google",
-    "mega.nz", "mediafire", "gofile",
-    "download.php", "direct-download",
+    "download",
+    "direct download",
+    "mediafire",
+    "gofile",
+    "mega.nz",
+    "drive.google",
+    "download.php",
     "file-download"
 ]
 
 WATCH_WORDS = [
-    "watch", "player", "stream",
-    "embed", "play", "video"
+    "watch",
+    "player",
+    "stream",
+    "embed",
+    "play",
+    "video"
 ]
 
 
 def classify_links(links):
+
     downloads = []
-    watch_links = []
+    watch = []
 
     for link in links:
-        text = link["Text"].lower()
-        url = link["URL"].lower()
 
-        combined = text + " " + url
+        combined = (
+            link["Text"] + " " + link["URL"]
+        ).lower()
 
-        if any(word in combined for word in DOWNLOAD_WORDS):
+        if any(
+            word in combined
+            for word in DOWNLOAD_WORDS
+        ):
             downloads.append(link)
 
-        if any(word in combined for word in WATCH_WORDS):
-            watch_links.append(link)
+        if any(
+            word in combined
+            for word in WATCH_WORDS
+        ):
+            watch.append(link)
 
-    return downloads, watch_links
+    return downloads, watch
 
 
-# ==========================================
-# POST TITLE
-# ==========================================
+# =====================================
+# EXTRACT TITLE
+# =====================================
 
 def extract_title(container):
+
     selectors = [
-        "h1", "h2", "h3", "h4",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
         ".post-title",
         ".entry-title",
-        ".title",
-        ".movie-title"
+        ".movie-title",
+        ".title"
     ]
 
     for selector in selectors:
+
         element = container.select_one(selector)
 
         if element:
-            title = element.get_text(" ", strip=True)
+
+            title = element.get_text(
+                " ", strip=True
+            )
 
             if title:
                 return title
 
-    # Fallback: image or anchor title
-    for element in container.select("a[title], img[alt]"):
-        title = element.get("title") or element.get("alt")
+    for element in container.select(
+        "a[title], img[alt]"
+    ):
 
-        if title and len(title.strip()) > 2:
+        title = (
+            element.get("title")
+            or element.get("alt")
+        )
+
+        if title:
             return title.strip()
 
     return ""
 
 
-# ==========================================
-# POST URL
-# ==========================================
+# =====================================
+# EXTRACT POST URL
+# =====================================
 
 def extract_post_url(container, page_url):
-    candidates = []
 
-    for link in container.select("a[href]"):
-        href = clean_url(link.get("href"), page_url)
+    for a in container.select("a[href]"):
+
+        href = clean_url(
+            a.get("href"), page_url
+        )
 
         if not href or not same_domain(href):
             continue
@@ -254,42 +288,25 @@ def extract_post_url(container, page_url):
         if href == page_url:
             continue
 
-        text = link.get_text(" ", strip=True)
-        has_image = link.find("img") is not None
+        if (
+            a.find(["h1", "h2", "h3", "h4"])
+            or a.find("img")
+            or a.get_text(strip=True)
+        ):
+            return href
 
-        score = 0
-
-        if link.find(["h1", "h2", "h3", "h4"]):
-            score += 5
-
-        if text:
-            score += 2
-
-        if has_image:
-            score += 2
-
-        if link.get("title"):
-            score += 1
-
-        candidates.append((score, href))
-
-    if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0][1]
-
-    return ""
+    return page_url
 
 
-# ==========================================
-# SMART POST CONTAINER DETECTION
-# ==========================================
+# =====================================
+# FIND POST CONTAINERS
+# =====================================
 
 def find_post_containers(soup):
 
     selectors = [
         "article",
         ".post",
-        ".posts",
         ".post-item",
         ".post-box",
         ".post-card",
@@ -301,7 +318,6 @@ def find_post_containers(soup):
         ".movie-card",
         ".item",
         ".grid-item",
-        ".card",
         ".video-item",
         ".download-item"
     ]
@@ -309,150 +325,132 @@ def find_post_containers(soup):
     containers = []
 
     for selector in selectors:
-        containers.extend(soup.select(selector))
 
-    # Fallback: detect parents containing links and images
+        containers.extend(
+            soup.select(selector)
+        )
+
+    # Fallback
     if not containers:
+
         for link in soup.select("a[href]"):
-            if link.find("img") or link.get_text(strip=True):
-                parent = link
 
-                for _ in range(4):
-                    if parent.parent and parent.parent.name not in (
-                        "body", "html"
-                    ):
-                        parent = parent.parent
+            if link.find("img"):
 
-                containers.append(parent)
+                parent = link.parent
 
-    # Remove duplicate objects
+                if parent:
+                    containers.append(parent)
+
+    # Deduplicate using object identity
     unique = {}
+
     for container in containers:
-        key = str(container)[:500]
-        unique[key] = container
+
+        unique[id(container)] = container
 
     return list(unique.values())
 
 
-# ==========================================
-# SINGLE POST EXTRACTION
-# ==========================================
+# =====================================
+# EXTRACT POST DATA
+# =====================================
 
 def extract_post(container, page_url):
 
     title = extract_title(container)
-    post_url = extract_post_url(container, page_url)
 
-    images = extract_images(container, page_url)
-    links = extract_links(container, page_url)
+    post_url = extract_post_url(
+        container, page_url
+    )
+
+    images = extract_images(
+        container, page_url
+    )
+
+    links = extract_links(
+        container, page_url
+    )
 
     if not title and not images:
         return None
 
-    if not post_url:
-        post_url = page_url
-
-    # Fetch individual post page for more links/images
-    detail_soup = get_soup(post_url) if post_url != page_url else None
-
-    if detail_soup:
-        detail_images = extract_images(
-            detail_soup, post_url
-        )
-
-        detail_links = extract_links(
-            detail_soup, post_url
-        )
-
-        images.extend(detail_images)
-        links.extend(detail_links)
-
-        if not title:
-            title = extract_title(detail_soup)
-
-    # Remove duplicates
-    unique_images = {
-        image["URL"]: image for image in images
-    }
-
-    unique_links = {
-        link["URL"]: link for link in links
-    }
-
-    images = list(unique_images.values())
-    links = list(unique_links.values())
-
-    downloads, watch_links = classify_links(links)
+    downloads, watch = classify_links(links)
 
     return {
+
         "Title": title,
-        "Image URL": images[0]["URL"] if images else "",
+
+        "Image URL": (
+            images[0] if images else ""
+        ),
+
         "All Images": images,
+
         "Post URL": post_url,
-        "Download Link": downloads[0]["URL"] if downloads else "",
+
+        "Download Link": (
+            downloads[0]["URL"]
+            if downloads else ""
+        ),
+
         "All Download Links": downloads,
-        "Watch / Player Links": watch_links,
+
+        "Watch / Player Links": watch,
+
         "All Links": links,
+
         "Source Page": page_url
+
     }
 
 
-# ==========================================
-# NEXT PAGE DETECTION
-# ==========================================
+# =====================================
+# FIND NEXT PAGE
+# =====================================
 
 def find_next_page(soup, current_url):
 
-    # rel="next"
     next_tag = soup.select_one(
-        'a[rel="next"], link[rel="next"]'
+        'a[rel="next"]'
     )
 
-    if next_tag and next_tag.get("href"):
-        url = clean_url(next_tag["href"], current_url)
+    if next_tag:
+
+        url = clean_url(
+            next_tag.get("href"),
+            current_url
+        )
 
         if url and same_domain(url):
             return url
 
     next_words = [
-        "next", "older", "older posts",
-        "next page", "→", "»", "›"
+        "next",
+        "older",
+        "next page",
+        "»",
+        "›"
     ]
 
-    for link in soup.select("a[href]"):
+    for a in soup.select("a[href]"):
 
-        text = link.get_text(" ", strip=True).lower()
-        aria = link.get("aria-label", "").lower()
-        title = link.get("title", "").lower()
-        classes = " ".join(link.get("class", [])).lower()
+        text = (
+            a.get_text(" ", strip=True)
+            + " "
+            + a.get("aria-label", "")
+            + " "
+            + a.get("title", "")
+            + " "
+            + " ".join(a.get("class", []))
+        ).lower()
 
-        combined = " ".join([
-            text, aria, title, classes
-        ])
-
-        if any(word in combined for word in next_words):
+        if any(word in text for word in next_words):
 
             url = clean_url(
-                link.get("href"), current_url
+                a.get("href"),
+                current_url
             )
-
-            if url and same_domain(url):
-                return url
-
-    # Common pagination selectors
-    selectors = [
-        ".next a",
-        ".pagination-next a",
-        ".nav-next a",
-        ".next-page a",
-        "a.next"
-    ]
-
-    for selector in selectors:
-        tag = soup.select_one(selector)
-
-        if tag and tag.get("href"):
-            url = clean_url(tag["href"], current_url)
 
             if url and same_domain(url):
                 return url
@@ -460,9 +458,9 @@ def find_next_page(soup, current_url):
     return ""
 
 
-# ==========================================
-# MAIN PAGINATION SCRAPER
-# ==========================================
+# =====================================
+# MAIN SCRAPER
+# =====================================
 
 def scrape_website():
 
@@ -479,30 +477,44 @@ def scrape_website():
             current_url, START_URL
         )
 
-        if not current_url or not same_domain(current_url):
+        if not current_url:
+            break
+
+        if not same_domain(current_url):
+            print("[STOP] External domain detected")
             break
 
         if current_url in visited_pages:
-            print("[STOP] Repeated page detected")
+            print("[STOP] Duplicate page detected")
             break
 
         visited_pages.add(current_url)
+
         page_count += 1
 
-        print(f"\n[PAGE {page_count}] {current_url}")
+        # REQUIRED PROGRESS LOG
+        print(
+            f"\nScraping page: {current_url}",
+            flush=True
+        )
 
         soup = get_soup(current_url)
 
-        if not soup:
+        if soup is None:
+            print("[SKIP] Page could not be loaded")
             break
 
         containers = find_post_containers(soup)
 
-        print(f"[FOUND] {len(containers)} possible containers")
+        print(
+            f"[INFO] Found {len(containers)} containers",
+            flush=True
+        )
 
         for container in containers:
 
             try:
+
                 post = extract_post(
                     container, current_url
                 )
@@ -510,27 +522,32 @@ def scrape_website():
                 if not post:
                     continue
 
-                key = post["Post URL"]
+                post_url = post["Post URL"]
 
-                # Keep only first occurrence
-                if key not in all_posts:
-                    all_posts[key] = post
+                if post_url not in all_posts:
+
+                    all_posts[post_url] = post
 
                     print(
-                        f"[POST] {post['Title'][:70]}"
+                        "[POST]", post["Title"][:70],
+                        flush=True
                     )
 
-                time.sleep(REQUEST_DELAY)
-
             except Exception as error:
-                print(f"[POST ERROR] {error}")
+
+                print("[POST ERROR]", error)
+
+        # Stop after 3 pages
+        if page_count >= MAX_PAGES:
+            print("[INFO] Maximum 3 pages reached")
+            break
 
         next_url = find_next_page(
             soup, current_url
         )
 
         if not next_url:
-            print("[INFO] No next page found")
+            print("[INFO] Next page not found")
             break
 
         current_url = next_url
@@ -540,25 +557,37 @@ def scrape_website():
     return list(all_posts.values()), page_count
 
 
-# ==========================================
+# =====================================
 # SAVE JSON
-# ==========================================
+# =====================================
 
 def save_data(posts, page_count):
 
     if not posts:
-        print("[WARNING] No posts found. Old JSON preserved.")
+
+        print(
+            "[WARNING] No posts found. "
+            "Existing data.json preserved."
+        )
+
         return
 
     data = {
+
         "Website": BASE_URL,
+
         "Total Pages Scraped": page_count,
+
         "Total Posts": len(posts),
+
         "Posts": posts
+
     }
 
     with open(
-        OUTPUT_FILE, "w", encoding="utf-8"
+        OUTPUT_FILE,
+        "w",
+        encoding="utf-8"
     ) as file:
 
         json.dump(
@@ -568,23 +597,30 @@ def save_data(posts, page_count):
             ensure_ascii=False
         )
 
-    print("\n================================")
-    print(f"TOTAL PAGES: {page_count}")
-    print(f"TOTAL POSTS: {len(posts)}")
-    print(f"OUTPUT: {OUTPUT_FILE}")
-    print("================================")
+    print("\n==============================")
+    print("SCRAPING COMPLETED")
+    print("TOTAL PAGES:", page_count)
+    print("TOTAL POSTS:", len(posts))
+    print("SAVED:", OUTPUT_FILE)
+    print("==============================")
 
 
-# ==========================================
-# RUN
-# ==========================================
+# =====================================
+# START
+# =====================================
 
 if __name__ == "__main__":
 
-    print("SMART WEBSITE SCRAPER STARTED")
+    print("SMART SCRAPER STARTED", flush=True)
 
-    posts, pages = scrape_website()
+    try:
 
-    save_data(posts, pages)
+        posts, pages = scrape_website()
 
-    print("SCRAPING COMPLETED")
+        save_data(posts, pages)
+
+    finally:
+
+        session.close()
+
+    print("PROGRAM FINISHED", flush=True)
