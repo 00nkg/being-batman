@@ -1,626 +1,141 @@
-
-import requests
 import json
 import time
 import re
+from playwright.sync_api import sync_playwright
 
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urldefrag
-
-# =====================================
-# WEBSITE SETTINGS
-# =====================================
-
-BASE_URL = "https://vegamovies.lease"  # YOUR WEBSITE URL
-START_URL = BASE_URL
-
-OUTPUT_FILE = "data.json"
-
-MAX_PAGES = 3
-TIMEOUT = 10
-REQUEST_DELAY = 1
-
-# =====================================
-# HEADERS
-# =====================================
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,*/*",
-    "Accept-Language": "en-US,en;q=0.9"
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
-
-BASE_HOST = urlparse(BASE_URL).netloc.lower()
-
-
-# =====================================
-# URL CLEANER
-# =====================================
-
-def clean_url(url, base):
-
-    if not url:
-        return ""
-
-    url = urljoin(base, url.strip())
-    url, _ = urldefrag(url)
-
-    parsed = urlparse(url)
-
-    if parsed.scheme not in ("http", "https"):
-        return ""
-
-    return url
-
-
-def same_domain(url):
-
-    return (
-        urlparse(url).netloc.lower()
-        == BASE_HOST
-    )
-
-
-# =====================================
-# FETCH WEBSITE
-# =====================================
-
-def get_soup(url):
-
-    try:
-
-        response = session.get(
-            url,
-            timeout=TIMEOUT,
-            allow_redirects=True
+def scrape_vegamovies():
+    results = []
+    
+    with sync_playwright() as p:
+        # हेडलेस ब्राउज़र लॉन्च करें (GitHub Actions के लिए ज़रूरी है)
+        browser = p.chromium.launch(headless=True)
+        
+        # ब्राउज़र कॉन्टेक्स्ट सेट करें (Ads और बॉट ब्लॉकिंग से बचने के लिए)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
         )
-
-        response.raise_for_status()
-
-        content_type = response.headers.get(
-            "Content-Type", ""
-        )
-
-        if "html" not in content_type.lower():
-            print("[WARNING] Not an HTML page:", url)
-            return None
-
-        return BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
-
-    except requests.Timeout:
-
-        print("[TIMEOUT] Website took too long:", url)
-        return None
-
-    except requests.RequestException as error:
-
-        print("[ERROR]", error)
-        return None
-
-
-# =====================================
-# EXTRACT IMAGES
-# =====================================
-
-def extract_images(container, page_url):
-
-    images = []
-
-    for img in container.select("img"):
-
-        src = (
-            img.get("data-src")
-            or img.get("data-lazy-src")
-            or img.get("data-original")
-            or img.get("src")
-        )
-
-        if not src and img.get("srcset"):
-
-            src = (
-                img["srcset"]
-                .split(",")[0]
-                .strip()
-                .split(" ")[0]
-            )
-
-        if src:
-
-            image_url = clean_url(src, page_url)
-
-            if image_url:
-                images.append(image_url)
-
-    return list(set(images))
-
-
-# =====================================
-# EXTRACT ALL LINKS
-# =====================================
-
-def extract_links(container, page_url):
-
-    links = []
-
-    for a in container.select("a[href]"):
-
-        href = clean_url(
-            a.get("href"), page_url
-        )
-
-        if not href:
-            continue
-
-        links.append({
-            "Text": a.get_text(" ", strip=True),
-            "URL": href
-        })
-
-    unique = {
-        link["URL"]: link
-        for link in links
-    }
-
-    return list(unique.values())
-
-
-# =====================================
-# DOWNLOAD LINK DETECTION
-# =====================================
-
-DOWNLOAD_WORDS = [
-    "download",
-    "direct download",
-    "mediafire",
-    "gofile",
-    "mega.nz",
-    "drive.google",
-    "download.php",
-    "file-download"
-]
-
-WATCH_WORDS = [
-    "watch",
-    "player",
-    "stream",
-    "embed",
-    "play",
-    "video"
-]
-
-
-def classify_links(links):
-
-    downloads = []
-    watch = []
-
-    for link in links:
-
-        combined = (
-            link["Text"] + " " + link["URL"]
-        ).lower()
-
-        if any(
-            word in combined
-            for word in DOWNLOAD_WORDS
-        ):
-            downloads.append(link)
-
-        if any(
-            word in combined
-            for word in WATCH_WORDS
-        ):
-            watch.append(link)
-
-    return downloads, watch
-
-
-# =====================================
-# EXTRACT TITLE
-# =====================================
-
-def extract_title(container):
-
-    selectors = [
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        ".post-title",
-        ".entry-title",
-        ".movie-title",
-        ".title"
-    ]
-
-    for selector in selectors:
-
-        element = container.select_one(selector)
-
-        if element:
-
-            title = element.get_text(
-                " ", strip=True
-            )
-
-            if title:
-                return title
-
-    for element in container.select(
-        "a[title], img[alt]"
-    ):
-
-        title = (
-            element.get("title")
-            or element.get("alt")
-        )
-
-        if title:
-            return title.strip()
-
-    return ""
-
-
-# =====================================
-# EXTRACT POST URL
-# =====================================
-
-def extract_post_url(container, page_url):
-
-    for a in container.select("a[href]"):
-
-        href = clean_url(
-            a.get("href"), page_url
-        )
-
-        if not href or not same_domain(href):
-            continue
-
-        if href == page_url:
-            continue
-
-        if (
-            a.find(["h1", "h2", "h3", "h4"])
-            or a.find("img")
-            or a.get_text(strip=True)
-        ):
-            return href
-
-    return page_url
-
-
-# =====================================
-# FIND POST CONTAINERS
-# =====================================
-
-def find_post_containers(soup):
-
-    selectors = [
-        "article",
-        ".post",
-        ".post-item",
-        ".post-box",
-        ".post-card",
-        ".entry",
-        ".entry-card",
-        ".blog-post",
-        ".movie",
-        ".movie-item",
-        ".movie-card",
-        ".item",
-        ".grid-item",
-        ".video-item",
-        ".download-item"
-    ]
-
-    containers = []
-
-    for selector in selectors:
-
-        containers.extend(
-            soup.select(selector)
-        )
-
-    # Fallback
-    if not containers:
-
-        for link in soup.select("a[href]"):
-
-            if link.find("img"):
-
-                parent = link.parent
-
-                if parent:
-                    containers.append(parent)
-
-    # Deduplicate using object identity
-    unique = {}
-
-    for container in containers:
-
-        unique[id(container)] = container
-
-    return list(unique.values())
-
-
-# =====================================
-# EXTRACT POST DATA
-# =====================================
-
-def extract_post(container, page_url):
-
-    title = extract_title(container)
-
-    post_url = extract_post_url(
-        container, page_url
-    )
-
-    images = extract_images(
-        container, page_url
-    )
-
-    links = extract_links(
-        container, page_url
-    )
-
-    if not title and not images:
-        return None
-
-    downloads, watch = classify_links(links)
-
-    return {
-
-        "Title": title,
-
-        "Image URL": (
-            images[0] if images else ""
-        ),
-
-        "All Images": images,
-
-        "Post URL": post_url,
-
-        "Download Link": (
-            downloads[0]["URL"]
-            if downloads else ""
-        ),
-
-        "All Download Links": downloads,
-
-        "Watch / Player Links": watch,
-
-        "All Links": links,
-
-        "Source Page": page_url
-
-    }
-
-
-# =====================================
-# FIND NEXT PAGE
-# =====================================
-
-def find_next_page(soup, current_url):
-
-    next_tag = soup.select_one(
-        'a[rel="next"]'
-    )
-
-    if next_tag:
-
-        url = clean_url(
-            next_tag.get("href"),
-            current_url
-        )
-
-        if url and same_domain(url):
-            return url
-
-    next_words = [
-        "next",
-        "older",
-        "next page",
-        "»",
-        "›"
-    ]
-
-    for a in soup.select("a[href]"):
-
-        text = (
-            a.get_text(" ", strip=True)
-            + " "
-            + a.get("aria-label", "")
-            + " "
-            + a.get("title", "")
-            + " "
-            + " ".join(a.get("class", []))
-        ).lower()
-
-        if any(word in text for word in next_words):
-
-            url = clean_url(
-                a.get("href"),
-                current_url
-            )
-
-            if url and same_domain(url):
-                return url
-
-    return ""
-
-
-# =====================================
-# MAIN SCRAPER
-# =====================================
-
-def scrape_website():
-
-    current_url = START_URL
-
-    visited_pages = set()
-    all_posts = {}
-
-    page_count = 0
-
-    while current_url and page_count < MAX_PAGES:
-
-        current_url = clean_url(
-            current_url, START_URL
-        )
-
-        if not current_url:
-            break
-
-        if not same_domain(current_url):
-            print("[STOP] External domain detected")
-            break
-
-        if current_url in visited_pages:
-            print("[STOP] Duplicate page detected")
-            break
-
-        visited_pages.add(current_url)
-
-        page_count += 1
-
-        # REQUIRED PROGRESS LOG
-        print(
-            f"\nScraping page: {current_url}",
-            flush=True
-        )
-
-        soup = get_soup(current_url)
-
-        if soup is None:
-            print("[SKIP] Page could not be loaded")
-            break
-
-        containers = find_post_containers(soup)
-
-        print(
-            f"[INFO] Found {len(containers)} containers",
-            flush=True
-        )
-
-        for container in containers:
-
-            try:
-
-                post = extract_post(
-                    container, current_url
-                )
-
-                if not post:
-                    continue
-
-                post_url = post["Post URL"]
-
-                if post_url not in all_posts:
-
-                    all_posts[post_url] = post
-
-                    print(
-                        "[POST]", post["Title"][:70],
-                        flush=True
-                    )
-
-            except Exception as error:
-
-                print("[POST ERROR]", error)
-
-        # Stop after 3 pages
-        if page_count >= MAX_PAGES:
-            print("[INFO] Maximum 3 pages reached")
-            break
-
-        next_url = find_next_page(
-            soup, current_url
-        )
-
-        if not next_url:
-            print("[INFO] Next page not found")
-            break
-
-        current_url = next_url
-
-        time.sleep(REQUEST_DELAY)
-
-    return list(all_posts.values()), page_count
-
-
-# =====================================
-# SAVE JSON
-# =====================================
-
-def save_data(posts, page_count):
-
-    if not posts:
-
-        print(
-            "[WARNING] No posts found. "
-            "Existing data.json preserved."
-        )
-
-        return
-
-    data = {
-
-        "Website": BASE_URL,
-
-        "Total Pages Scraped": page_count,
-
-        "Total Posts": len(posts),
-
-        "Posts": posts
-
-    }
-
-    with open(
-        OUTPUT_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-
-        json.dump(
-            data,
-            file,
-            indent=4,
-            ensure_ascii=False
-        )
-
-    print("\n==============================")
-    print("SCRAPING COMPLETED")
-    print("TOTAL PAGES:", page_count)
-    print("TOTAL POSTS:", len(posts))
-    print("SAVED:", OUTPUT_FILE)
-    print("==============================")
-
-
-# =====================================
-# START
-# =====================================
+        
+        page = context.new_page()
+
+        print("Level 1: मुख्य वेबसाइट पर जा रहे हैं...")
+        try:
+            page.goto("https://vegamovies.lease", timeout=60000)
+            page.wait_for_selector(".poster-card", timeout=30000)
+            time.sleep(2) # पेज लोड होने दें
+
+            # सिर्फ पहले 2 पोस्ट्स के लिए
+            post_cards = page.locator(".poster-card").all()[:2]
+
+            for card in post_cards:
+                post_data = {
+                    "Title": "", "Image URL": "", 
+                    "G-Direct Final Link": "", 
+                    "V-Cloud Final Links": [], 
+                    "Multi Final Links": []
+                }
+
+                try:
+                    # Title और Image URL निकालें
+                    post_data["Title"] = card.locator(".poster-title").inner_text().strip()
+                    post_data["Image URL"] = card.locator(".poster-image img").get_attribute("src")
+                    
+                    # Post URL निकालें (पैरेंट <a> टैग से)
+                    post_url = card.locator("xpath=..").get_attribute("href")
+                    print(f"स्क्रैप कर रहे हैं: {post_data['Title']}")
+
+                    print(f"  Level 2: पोस्ट पेज पर जा रहे हैं... ({post_url})")
+                    page.goto(post_url, timeout=60000)
+                    time.sleep(3)
+
+                    # Post Page पर nexdrive लिंक ढूँढें
+                    nexdrive_link = None
+                    links = page.locator("a").all()
+                    for link in links:
+                        href = link.get_attribute("href")
+                        if href and "nexdrive" in href:
+                            nexdrive_link = href
+                            break
+
+                    if nexdrive_link:
+                        print(f"  Level 3: Nexdrive पेज पर जा रहे हैं... ({nexdrive_link})")
+                        page.goto(nexdrive_link, timeout=60000)
+                        time.sleep(3) # लिंक लोड होने का इंतज़ार करें
+
+                        # G-Direct लिंक हैंडल करें
+                        try:
+                            print("    G-Direct का लिंक निकाल रहे हैं...")
+                            with page.context.expect_page(timeout=10000) as new_page_info:
+                                page.locator("a:has-text('G-Direct'), a:has-text('GDIRECT'), a:has-text('G-Direct')").first.click()
+                            new_tab = new_page_info.value
+                            new_tab.wait_for_load_state()
+                            post_data["G-Direct Final Link"] = new_tab.url
+                            new_tab.close()
+                        except Exception as e:
+                            print(f"    G-Direct Error: {e}")
+
+                        # V-Cloud लिंक हैंडल करें
+                        try:
+                            print("    V-Cloud के लिंक्स निकाल रहे हैं...")
+                            with page.context.expect_page(timeout=10000) as new_page_info:
+                                page.locator("a:has-text('V-Cloud'), a:has-text('VCloud')").first.click()
+                            new_tab = new_page_info.value
+                            new_tab.wait_for_load_state()
+                            time.sleep(3)
+                            
+                            # V-Cloud पेज से सारे लिंक निकालें
+                            v_links = []
+                            anchors = new_tab.locator("a").all()
+                            for a in anchors:
+                                href = a.get_attribute("href")
+                                if href and href.startswith("http") and "t.me" not in href and "telegram" not in href.lower():
+                                    if href not in v_links:
+                                        v_links.append(href)
+                            post_data["V-Cloud Final Links"] = v_links[:5] # सिर्फ 5 लिंक तक
+                            new_tab.close()
+                        except Exception as e:
+                            print(f"    V-Cloud Error: {e}")
+
+                        # Multi लिंक हैंडल करें
+                        try:
+                            print("    Multi के लिंक्स निकाल रहे हैं...")
+                            with page.context.expect_page(timeout=10000) as new_page_info:
+                                page.locator("a:has-text('Multi')").first.click()
+                            new_tab = new_page_info.value
+                            new_tab.wait_for_load_state()
+                            time.sleep(3)
+                            
+                            m_links = []
+                            anchors = new_tab.locator("a").all()
+                            for a in anchors:
+                                href = a.get_attribute("href")
+                                if href and href.startswith("http") and "t.me" not in href and "telegram" not in href.lower():
+                                    if href not in m_links:
+                                        m_links.append(href)
+                            post_data["Multi Final Links"] = m_links[:5]
+                            new_tab.close()
+                        except Exception as e:
+                            print(f"    Multi Error: {e}")
+
+                    else:
+                        print("  Nexdrive लिंक नहीं मिला।")
+                        
+                except Exception as e:
+                    print(f"पोस्ट स्क्रैप करने में एरर: {e}")
+                
+                # डेटा को लिस्ट में जोड़ें
+                results.append(post_data)
+                
+        except Exception as e:
+            print(f"मुख्य पेज एरर: {e}")
+
+        browser.close()
+        
+    # डेटा को JSON में सेव करें
+    with open("api/latest.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=4, ensure_ascii=False)
+    
+    print("स्क्रैपिंग सफलतापूर्वक पूरी हुई!")
 
 if __name__ == "__main__":
-
-    print("SMART SCRAPER STARTED", flush=True)
-
-    try:
-
-        posts, pages = scrape_website()
-
-        save_data(posts, pages)
-
-    finally:
-
-        session.close()
-
-    print("PROGRAM FINISHED", flush=True)
+    scrape_vegamovies()
